@@ -20,3 +20,15 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[dev]"
       - run: pytest -q
+
+  # Single stable context for branch protection: requiring the matrix directly
+  # would mean naming all 9 jobs, and any matrix change would silently break
+  # the rule.
+  all-green:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "matrix result: ${{ needs.test.result }}"
+          [ "${{ needs.test.result }}" = "success" ] || exit 1
