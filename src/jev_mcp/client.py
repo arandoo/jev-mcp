@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -16,6 +17,32 @@ import httpx
 DEFAULT_BASE = "https://jev-ai.pro/api"
 DEFAULT_MODEL = "jev-latest"
 RETRY_STATUSES = {429, 529}
+
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
+
+def dotenv_values(path: Path = ENV_FILE) -> dict[str, str]:
+    """Read KEY=VALUE pairs from the project's .env, if it exists.
+
+    Only a fallback: real environment variables always take precedence. This
+    lets the key live in one 0600 file instead of being copied into every
+    client's config, since MCP clients pass env vars but never read .env.
+    """
+    values: dict[str, str] = {}
+    try:
+        text = path.read_text()
+    except OSError:
+        return values
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+        values[key] = value.strip().strip('"').strip("'")
+    return values
 
 
 class JevError(RuntimeError):
@@ -30,14 +57,24 @@ class JevClient:
         timeout: float = 30.0,
         max_retries: int = 3,
     ) -> None:
-        self.api_key = api_key or os.environ.get("JEV_AI_API_KEY")
+        env_file = dotenv_values()
+        self.api_key = api_key or os.environ.get("JEV_AI_API_KEY") or env_file.get("JEV_AI_API_KEY")
         if not self.api_key:
             raise JevError(
-                "JEV_AI_API_KEY is not set. Export it or add it to .env "
-                "(see .env.example)."
+                f"JEV_AI_API_KEY is not set. Export it, pass it in the MCP "
+                f"server's env block, or add it to {ENV_FILE} (see .env.example)."
             )
-        self.base_url = (base_url or os.environ.get("JEV_AI_API_BASE") or DEFAULT_BASE).rstrip("/")
-        self.default_model = os.environ.get("JEV_DEFAULT_MODEL", DEFAULT_MODEL)
+        self.base_url = (
+            base_url
+            or os.environ.get("JEV_AI_API_BASE")
+            or env_file.get("JEV_AI_API_BASE")
+            or DEFAULT_BASE
+        ).rstrip("/")
+        self.default_model = (
+            os.environ.get("JEV_DEFAULT_MODEL")
+            or env_file.get("JEV_DEFAULT_MODEL")
+            or DEFAULT_MODEL
+        )
         self._http = httpx.AsyncClient(
             base_url=self.base_url,
             headers={

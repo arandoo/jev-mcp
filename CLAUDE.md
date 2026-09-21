@@ -15,7 +15,8 @@ A lean Python (mcp SDK 2.x, MCPServer) server wrapping TypeSafe AI's Jev decisio
 - All new behaviour needs a mocked test in `tests/` (respx, no real network).
 
 ## Layout
-- `src/jev_mcp/client.py`  — httpx client, retry on 429/529, actionable errors
+- `src/jev_mcp/client.py`  — httpx client, retry on 429/529, actionable errors,
+  `.env` fallback for the key (env vars win)
 - `src/jev_mcp/server.py`  — FastMCP tools: `jev_evaluate`, `jev_route`
 - `tests/test_server.py`   — mocked smoke tests
 

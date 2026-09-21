@@ -8,7 +8,7 @@ from httpx import Response
 
 os.environ.setdefault("JEV_AI_API_KEY", "test-key")
 
-from jev_mcp import server  # noqa: E402
+from jev_mcp import client, server  # noqa: E402
 from jev_mcp.server import EvaluateInput, RouteInput  # noqa: E402
 
 ENDPOINT = "https://jev-ai.pro/api/v1/systemone"
@@ -57,3 +57,41 @@ async def test_route_escalates_below_threshold():
 def test_choice_requires_criteria():
     with pytest.raises(ValueError):
         EvaluateInput(state="x", questions={"q": {"type": "choice", "instructions": "?"}})
+
+
+def test_dotenv_parses_and_ignores_comments(tmp_path):
+    p = tmp_path / ".env"
+    p.write_text(
+        '# a comment\n'
+        'JEV_AI_API_KEY="sk_from_file"\n'
+        "\n"
+        "export JEV_AI_API_BASE='https://example.test/api'\n"
+        "MALFORMED_NO_EQUALS\n"
+    )
+    vals = client.dotenv_values(p)
+    assert vals["JEV_AI_API_KEY"] == "sk_from_file"
+    assert vals["JEV_AI_API_BASE"] == "https://example.test/api"
+    assert "MALFORMED_NO_EQUALS" not in vals
+
+
+def test_dotenv_missing_file_is_empty(tmp_path):
+    assert client.dotenv_values(tmp_path / "nope.env") == {}
+
+
+def test_env_var_beats_dotenv(monkeypatch):
+    monkeypatch.setenv("JEV_AI_API_KEY", "sk_from_env")
+    monkeypatch.setattr(client, "dotenv_values", lambda *a, **k: {"JEV_AI_API_KEY": "sk_from_file"})
+    assert client.JevClient().api_key == "sk_from_env"
+
+
+def test_dotenv_used_when_env_var_absent(monkeypatch):
+    monkeypatch.delenv("JEV_AI_API_KEY", raising=False)
+    monkeypatch.setattr(client, "dotenv_values", lambda *a, **k: {"JEV_AI_API_KEY": "sk_from_file"})
+    assert client.JevClient().api_key == "sk_from_file"
+
+
+def test_missing_key_everywhere_raises(monkeypatch):
+    monkeypatch.delenv("JEV_AI_API_KEY", raising=False)
+    monkeypatch.setattr(client, "dotenv_values", lambda *a, **k: {})
+    with pytest.raises(client.JevError, match="JEV_AI_API_KEY is not set"):
+        client.JevClient()
