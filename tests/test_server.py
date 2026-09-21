@@ -78,6 +78,29 @@ def test_dotenv_missing_file_is_empty(tmp_path):
     assert client.dotenv_values(tmp_path / "nope.env") == {}
 
 
+def test_dotenv_tolerates_utf8_bom(tmp_path):
+    """PowerShell's Set-Content -Encoding utf8 prepends a BOM."""
+    p = tmp_path / ".env"
+    p.write_bytes(b"\xef\xbb\xbfJEV_AI_API_KEY=sk_bom\n")
+    assert client.dotenv_values(p)["JEV_AI_API_KEY"] == "sk_bom"
+
+
+def test_dotenv_tolerates_crlf(tmp_path):
+    """Windows editors write CRLF line endings."""
+    p = tmp_path / ".env"
+    p.write_bytes(b"JEV_AI_API_KEY=sk_crlf\r\nJEV_AI_API_BASE=https://x.test\r\n")
+    vals = client.dotenv_values(p)
+    assert vals["JEV_AI_API_KEY"] == "sk_crlf"
+    assert vals["JEV_AI_API_BASE"] == "https://x.test"
+
+
+def test_dotenv_undecodable_file_is_empty(tmp_path):
+    """A UTF-16 .env (PowerShell 5.1 Out-File default) must not crash the server."""
+    p = tmp_path / ".env"
+    p.write_bytes("JEV_AI_API_KEY=sk_utf16\n".encode("utf-16"))
+    assert client.dotenv_values(p) == {}
+
+
 def test_env_var_beats_dotenv(monkeypatch):
     monkeypatch.setenv("JEV_AI_API_KEY", "sk_from_env")
     monkeypatch.setattr(client, "dotenv_values", lambda *a, **k: {"JEV_AI_API_KEY": "sk_from_file"})

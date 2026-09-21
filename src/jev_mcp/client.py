@@ -30,8 +30,10 @@ def dotenv_values(path: Path = ENV_FILE) -> dict[str, str]:
     """
     values: dict[str, str] = {}
     try:
-        text = path.read_text()
-    except OSError:
+        # utf-8-sig strips a BOM: PowerShell's Set-Content -Encoding utf8 writes
+        # one, and it would otherwise become part of the first key's name.
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
         return values
     for line in text.splitlines():
         line = line.strip()
