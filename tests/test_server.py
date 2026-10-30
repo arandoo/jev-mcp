@@ -118,3 +118,147 @@ def test_missing_key_everywhere_raises(monkeypatch):
     monkeypatch.setattr(client, "dotenv_values", lambda *a, **k: {})
     with pytest.raises(client.JevError, match="JEV_AI_API_KEY is not set"):
         client.JevClient()
+
+
+# ---------- images / box ----------
+
+import base64  # noqa: E402
+
+from jev_mcp.server import EvaluateImagesInput  # noqa: E402
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 16
+
+
+def _box_response(confidence=0.9):
+    return Response(200, json={
+        "model": "jev-latest",
+        "answers": {
+            "damaged": {"type": "noul", "noul": 0.97},
+            "where": {"type": "box", "box": {"top": 0.2, "bottom": 0.6, "left": 0.1, "right": 0.5}, "confidence": confidence},
+        },
+        "usage": {"input_tokens": 300, "output_tokens": 4},
+    })
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_evaluate_sends_image_asset_and_header(tmp_path):
+    img = tmp_path / "parcel.png"
+    img.write_bytes(PNG)
+    route = respx.post(ENDPOINT).mock(return_value=_box_response())
+    out = json.loads(await server.jev_evaluate(EvaluateInput(
+        state="Customer photo: IMG_parcel",
+        questions={
+            "damaged": {"type": "noul", "instructions": "Is the parcel damaged?"},
+            "where": {"type": "box", "instructions": "The damaged area"},
+        },
+        images={"IMG_parcel": str(img)},
+    )))
+    assert out["answers"]["where"]["box"]["top"] == 0.2
+    req = route.calls.last.request
+    assert req.headers["TypeSafe-Danger-Zone-Images"] == "true"
+    body = json.loads(req.content)
+    asset = body["assets"]["IMG_parcel"]
+    assert asset == {"type": "image", "format": "png", "data_base64": base64.b64encode(PNG).decode()}
+    assert "criteria" not in body["questions"]["where"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_text_only_request_has_no_images_header():
+    route = respx.post(ENDPOINT).mock(return_value=Response(200, json={
+        "model": "jev-latest", "answers": {"q": {"type": "noul", "noul": 0.1}}, "usage": {},
+    }))
+    await server.jev_evaluate(EvaluateInput(state="hi", questions={"q": {"type": "noul", "instructions": "?"}}))
+    req = route.calls.last.request
+    assert "TypeSafe-Danger-Zone-Images" not in req.headers
+    assert "assets" not in json.loads(req.content)
+
+
+def test_box_rejects_criteria():
+    with pytest.raises(ValueError, match="no criteria"):
+        EvaluateInput(state="IMG_a", images={"IMG_a": "/x.png"},
+                      questions={"b": {"type": "box", "instructions": "face", "criteria": {"x": "y"}}})
+
+
+def test_box_without_image_rejected():
+    with pytest.raises(ValueError, match="need an image"):
+        EvaluateInput(state="text", questions={"b": {"type": "box", "instructions": "face"}})
+
+
+def test_unused_placeholder_rejected():
+    with pytest.raises(ValueError, match="not used"):
+        EvaluateInput(state="no placeholder here", images={"IMG_a": "/x.png"},
+                      questions={"q": {"type": "noul", "instructions": "?"}})
+
+
+def test_placeholder_in_criteria_counts():
+    EvaluateInput(state="Which matches?", images={"IMG_ref": "/x.png"},
+                  questions={"q": {"type": "choice", "instructions": "?", "criteria": {"same": "Looks like IMG_ref", "other": None}}})
+
+
+@pytest.mark.asyncio
+async def test_non_image_file_returns_actionable_error(tmp_path):
+    f = tmp_path / "pic.webp"
+    f.write_bytes(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+    out = json.loads(await server.jev_evaluate(EvaluateInput(
+        state="IMG_a", images={"IMG_a": str(f)}, questions={"q": {"type": "noul", "instructions": "?"}},
+    )))
+    assert "only PNG or JPEG" in out["error"]
+
+
+def test_oversize_image_rejected(tmp_path, monkeypatch):
+    from jev_mcp import images
+    f = tmp_path / "big.png"
+    f.write_bytes(PNG)
+    monkeypatch.setattr(images, "MAX_IMAGE_BYTES", 10)
+    with pytest.raises(images.ImageError, match="16 MB"):
+        images.load_image(f)
+
+
+def test_jpeg_sniffed_regardless_of_suffix(tmp_path):
+    from jev_mcp import images
+    f = tmp_path / "frame.png"  # wrong suffix on purpose
+    f.write_bytes(JPEG)
+    assert images.load_image(f)["format"] == "jpeg"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_batch_expands_directory_flags_review_and_sums_usage(tmp_path):
+    d = tmp_path / "frames"
+    d.mkdir()
+    (d / "f_0001.png").write_bytes(PNG)
+    (d / "f_0002.jpg").write_bytes(JPEG)
+    (d / "notes.txt").write_text("ignored")
+    bad = tmp_path / "broken.png"
+    bad.write_bytes(b"not an image")
+    respx.post(ENDPOINT).mock(side_effect=[_box_response(0.9), _box_response(0.3)])
+    out = json.loads(await server.jev_evaluate_images(EvaluateImagesInput(
+        paths=[str(d), str(bad)],
+        context="Delivery photo.",
+        questions={
+            "damaged": {"type": "noul", "instructions": "Is the parcel damaged?"},
+            "where": {"type": "box", "instructions": "The damaged area"},
+        },
+        confidence_threshold=0.8,
+    )))
+    assert out["count"] == 3 and out["failed"] == 1
+    assert [r["path"].rsplit("/", 1)[-1] for r in out["results"]] == ["f_0001.png", "f_0002.jpg", "broken.png"]
+    reviews = sorted(tuple(r["review"]) for r in out["results"] if "review" in r)
+    assert reviews == [(), ("where",)]
+    assert out["usage"] == {"input_tokens": 600, "output_tokens": 8}
+    for call in respx.calls:
+        body = json.loads(call.request.content)
+        (ph,) = body["assets"]
+        assert body["state"] == f"Delivery photo.\n{ph}"
+        assert call.request.headers["TypeSafe-Danger-Zone-Images"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_batch_with_no_images_errors(tmp_path):
+    out = json.loads(await server.jev_evaluate_images(EvaluateImagesInput(
+        paths=[str(tmp_path)], questions={"q": {"type": "noul", "instructions": "?"}},
+    )))
+    assert "no PNG/JPEG" in out["error"]

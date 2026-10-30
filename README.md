@@ -1,12 +1,35 @@
 # jev-mcp
 
 MCP server that exposes TypeSafe AI's **Jev** decision model to Claude
-(Desktop, Code, Cowork). Two tools:
+(Desktop, Code, Cowork). Three tools:
 
 | Tool | Use |
 |---|---|
-| `jev_evaluate` | Full System One call: state + any mix of `noul` / `choice` / `score` questions |
+| `jev_evaluate` | Full System One call: state + any mix of `noul` / `choice` / `score` / `box` questions, optional local images |
+| `jev_evaluate_images` | Same questions over many local PNG/JPEG files or a folder (one call per image, 8 in parallel), optional review flag below a confidence threshold |
 | `jev_route` | One choice question + confidence threshold → `{choice, confidence, escalate}` |
+
+## Images and box
+
+Pass local paths, never base64: the server reads the file, checks it is PNG or
+JPEG (by its bytes, max 16 MB) and sends it as a TypeSafe asset with the
+`TypeSafe-Danger-Zone-Images: true` header. Image bytes never pass through the
+MCP client's context.
+
+- `jev_evaluate`: `images={"IMG_parcel": "~/photos/p1.jpg"}` and put
+  `IMG_parcel` where Jev should see the image (state, instructions or criteria).
+  A placeholder that appears nowhere is rejected, so an image is never dropped
+  silently.
+- `box` questions take only `instructions` ("the damaged area", "the person's
+  face") and return `{top, bottom, left, right}` as fractions of image height
+  and width, plus a confidence. They need an image.
+- `jev_evaluate_images`: `paths` takes files and/or folders (a folder adds its
+  `*.png/*.jpg/*.jpeg`, sorted, not recursive). With `confidence_threshold`,
+  each result lists the question ids answered below it in `review` (noul uses
+  `max(p, 1-p)`).
+- Video: Jev has no video input. Pull frames first, e.g.
+  `ffmpeg -i in.mp4 -vf fps=1 frames/f_%04d.jpg`, then pass the folder.
+  WebP/HEIC: convert first (`sips -s format png in.webp --out out.png`).
 
 ## Setup
 
@@ -61,7 +84,9 @@ are loaded at startup.
 
 ## API reference
 
-Docs: https://docs.typesafe.ai/api — `POST /v1/systemone`, verified 2026-09-21.
-Live API base: `https://jev-ai.pro/api` (override with `JEV_AI_API_BASE`).
-Note the docs host and the API host differ; `api.typesafe.ai` rejects `sk_jev-ai_` keys.
+Docs: https://docs.typesafe.ai/api — `POST /v1/systemone`, verified 2026-09-21;
+images/box contract from `https://api.typesafe.ai/openapi.json` (API 0.2.0), verified 2026-10-30.
+Default API base: `https://jev-ai.pro/api` (override with `JEV_AI_API_BASE`).
+`https://api.typesafe.ai` accepts our key as of 2026-10-30 (live image calls answered by `jev-1.14.0`).
 Jev 1.13 limits: 64k total context, 32k for state + longest question.
+Images: PNG/JPEG only, 16 MB per image; input ~$0.04 per 1M tokens, output free.

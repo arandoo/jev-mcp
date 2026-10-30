@@ -51,7 +51,8 @@ Owner-approval required: tags, GitHub releases, CI config, repo settings.
 ## Layout
 - `src/jev_mcp/client.py`  — httpx client, retry on 429/529, actionable errors,
   `.env` fallback for the key (env vars win)
-- `src/jev_mcp/server.py`  — FastMCP tools: `jev_evaluate`, `jev_route`
+- `src/jev_mcp/server.py`  — FastMCP tools: `jev_evaluate`, `jev_evaluate_images`, `jev_route`
+- `src/jev_mcp/images.py`  — reads local PNG/JPEG into TypeSafe image assets (paths in, never base64)
 - `tests/test_server.py`   — mocked smoke tests
 
 ## Commands
@@ -66,5 +67,4 @@ Owner-approval required: tags, GitHub releases, CI config, repo settings.
 
 ## Possible next steps (only if asked)
 - `jev_score_urgency` convenience tool
-- Batch evaluate (list of states)
 - Streamable HTTP transport for a shared/team server

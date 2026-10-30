@@ -2,7 +2,9 @@
 
 API contract: POST {base}/v1/systemone, base = https://jev-ai.pro/api
   Authorization: Bearer <JEV_AI_API_KEY>
-  body: { "state": str|object|array, "model": str, "questions": {id: Question} }
+  body: { "state": str|object|array, "model": str, "questions": {id: Question},
+          "assets"?: {placeholder: {"type": "image", "format": png|jpg|jpeg, "data_base64": str}} }
+  Requests with assets or box questions need the header TypeSafe-Danger-Zone-Images: true.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import httpx
 DEFAULT_BASE = "https://jev-ai.pro/api"
 DEFAULT_MODEL = "jev-latest"
 RETRY_STATUSES = {429, 529}
+IMAGES_HEADER = {"TypeSafe-Danger-Zone-Images": "true"}
 
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
@@ -92,23 +95,30 @@ class JevClient:
         state: str | dict[str, Any] | list[Any],
         questions: dict[str, dict[str, Any]],
         model: str | None = None,
+        assets: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        payload = {
+        payload: dict[str, Any] = {
             "state": state,
             "model": model or self.default_model,
             "questions": questions,
         }
+        if assets:
+            payload["assets"] = assets
+        uses_images = bool(assets) or any(q.get("type") == "box" for q in questions.values())
+        headers = IMAGES_HEADER if uses_images else None
         delay = 1.0
         for attempt in range(self.max_retries + 1):
-            resp = await self._http.post("/v1/systemone", json=payload)
+            resp = await self._http.post("/v1/systemone", json=payload, headers=headers)
             if resp.status_code in RETRY_STATUSES and attempt < self.max_retries:
                 await asyncio.sleep(delay)
                 delay *= 2
                 continue
             if resp.status_code == 401:
                 raise JevError("401 Unauthorized: JEV_AI_API_KEY is missing or invalid.")
-            if resp.status_code == 422:
-                raise JevError(f"422 validation error from TypeSafe: {resp.text}")
+            if resp.status_code == 413:
+                raise JevError("413 Payload too large: an image is over the 16 MB limit.")
+            if resp.status_code in (400, 422):
+                raise JevError(f"{resp.status_code} validation error from TypeSafe: {resp.text}")
             if resp.is_error:
                 raise JevError(f"TypeSafe API error {resp.status_code}: {resp.text}")
             return resp.json()
