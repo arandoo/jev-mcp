@@ -131,8 +131,16 @@ from pathlib import Path  # noqa: E402
 
 from jev_mcp.server import EvaluateImagesInput  # noqa: E402
 
-PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
-JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 16
+def _encode(size, fmt):
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", size, (200, 120, 90)).save(buf, format=fmt)
+    return buf.getvalue()
+
+
+PNG = _encode((8, 8), "PNG")
+JPEG = _encode((8, 8), "JPEG")
 
 
 def _box_response(confidence=0.9):
@@ -211,6 +219,35 @@ async def test_non_image_file_returns_actionable_error(tmp_path):
         state="IMG_a", images={"IMG_a": str(f)}, questions={"q": {"type": "noul", "instructions": "?"}},
     )))
     assert "only PNG or JPEG" in out["error"]
+
+
+@pytest.mark.parametrize("size, fmt, expect", [
+    ((2180, 402), "PNG", (1568, 289)),
+    ((1080, 1920), "JPEG", (882, 1568)),
+    ((1568, 400), "PNG", (1568, 400)),
+])
+def test_long_side_downscaled_to_api_limit(tmp_path, size, fmt, expect):
+    import io
+    from PIL import Image
+    from jev_mcp import images
+    f = tmp_path / f"img.{fmt.lower()}"
+    raw = _encode(size, fmt)
+    f.write_bytes(raw)
+    asset = images.load_image(f)
+    data = base64.b64decode(asset["data_base64"])
+    with Image.open(io.BytesIO(data)) as im:
+        assert im.size == expect and im.format == fmt
+    assert asset["format"] == fmt.lower()
+    if size == expect:
+        assert data == raw  # within limit: sent byte-for-byte
+
+
+def test_undecodable_png_rejected(tmp_path):
+    from jev_mcp import images
+    f = tmp_path / "trunc.png"
+    f.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+    with pytest.raises(images.ImageError, match="cannot decode"):
+        images.load_image(f)
 
 
 def test_oversize_image_rejected(tmp_path, monkeypatch):

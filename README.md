@@ -31,6 +31,8 @@ MCP client's context.
   `*.png/*.jpg/*.jpeg`, sorted, not recursive). With `confidence_threshold`,
   each result lists the question ids answered below it in `review` (noul uses
   `max(p, 1-p)`).
+- Large images are fine: anything over 1568 px on its longest side is
+  downscaled before upload (needs Pillow, a declared dependency).
 - Video: Jev has no video input. Pull frames first, e.g.
   `ffmpeg -i in.mp4 -vf fps=1 frames/f_%04d.jpg`, then pass the folder.
   WebP/HEIC: convert first (`sips -s format png in.webp --out out.png`).
@@ -93,4 +95,4 @@ images/box contract from `https://api.typesafe.ai/openapi.json` (API 0.2.0), ver
 Default API base: `https://jev-ai.pro/api` (override with `JEV_AI_API_BASE`).
 `https://api.typesafe.ai` accepts our key as of 2026-10-30 (live image calls answered by `jev-1.14.0`).
 Jev 1.13 limits: 64k total context, 32k for state + longest question.
-Images: PNG/JPEG only (by spec); 16 MB per image is the documented product limit, not in the OpenAPI spec; input ~$0.04 per 1M tokens, output free.
+Images: PNG/JPEG only (by spec); 16 MB per image is the documented product limit. Longest side max 1568 px (not in the spec; probed 2026-10-30: 1569 returns 400 "Invalid image dimensions"). The server downscales larger images automatically, keeping format and aspect ratio, so box fractions still map onto the original; input ~$0.04 per 1M tokens, output free.
