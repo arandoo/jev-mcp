@@ -8,6 +8,9 @@ import respx
 from httpx import Response
 
 os.environ.setdefault("JEV_AI_API_KEY", "test-key")
+# Pin the base so a developer .env (e.g. JEV_AI_API_BASE=https://api.typesafe.ai) can't
+# redirect mocked calls; env vars win over .env.
+os.environ["JEV_AI_API_BASE"] = "https://jev-ai.pro/api"
 
 from jev_mcp import client, server  # noqa: E402
 from jev_mcp.server import EvaluateInput, RouteInput  # noqa: E402
