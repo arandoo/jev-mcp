@@ -385,3 +385,61 @@ def test_bad_placeholders_rejected(images_map, state):
 def test_placeholder_with_backslash_or_quote_accepted():
     EvaluateInput(state='see C:\\img and "IMG_q"', images={"C:\\img": "/a.png", '"IMG_q"': "/b.png"},
                   questions={"q": {"type": "noul", "instructions": "?"}})
+
+
+def _decoded(asset):
+    import io
+    from PIL import Image
+    im = Image.open(io.BytesIO(base64.b64decode(asset["data_base64"])))
+    return im
+
+
+def test_one_pixel_over_limit_is_downscaled(tmp_path):
+    from jev_mcp import images
+    f = tmp_path / "w.png"
+    f.write_bytes(_encode((1569, 300), "PNG"))
+    assert max(_decoded(images.load_image(f)).size) == 1568
+
+
+@pytest.mark.parametrize("size", [(1500, 1000), (2000, 1000)])
+def test_exif_rotation_applied_on_both_sides_of_limit(tmp_path, size):
+    """Same camera, same frame: box fractions refer to the upright image either way."""
+    import io
+    from PIL import Image
+    from jev_mcp import images
+    im = Image.new("RGB", size, (10, 20, 30))
+    exif = im.getexif()
+    exif[0x0112] = 6  # rotate 90 CW on display
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", exif=exif)
+    f = tmp_path / "cam.jpg"
+    f.write_bytes(buf.getvalue())
+    out = _decoded(images.load_image(f))
+    w, h = out.size
+    assert h > w  # portrait, as displayed
+    assert out.getexif().get(0x0112, 1) == 1
+
+
+def test_palette_png_downscale_keeps_thin_lines(tmp_path):
+    from PIL import Image
+    from jev_mcp import images
+    im = Image.new("P", (3136, 400), 0)
+    im.putpalette([255, 255, 255, 0, 0, 0] + [0] * 762)
+    for x in range(0, 3136, 2):
+        for y in range(400):
+            im.putpixel((x, y), 1)
+    f = tmp_path / "lines.png"
+    im.save(f)
+    out = _decoded(images.load_image(f)).convert("L")
+    lo, hi = out.getextrema()
+    assert lo < 200  # not washed out to pure white
+
+
+def test_decompression_bomb_message(tmp_path, monkeypatch):
+    from PIL import Image
+    from jev_mcp import images
+    f = tmp_path / "big.png"
+    f.write_bytes(_encode((2000, 2000), "PNG"))
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1000)
+    with pytest.raises(images.ImageError, match="too large to decode"):
+        images.load_image(f)

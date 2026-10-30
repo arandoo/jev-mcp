@@ -34,24 +34,37 @@ def sniff_format(head: bytes) -> str | None:
     return None
 
 
-def fit_longest_side(data: bytes, fmt: str) -> bytes:
-    """Downscale so the longest side is at most MAX_IMAGE_SIDE; small images pass through byte-for-byte.
+EXIF_ORIENTATION = 0x0112
 
-    Box answers are fractions of width/height, so they still map onto the original file.
+
+def fit_longest_side(data: bytes, fmt: str) -> tuple[bytes, bool]:
+    """Return (bytes to send, re-encoded?).
+
+    Re-encodes when the longest side is over MAX_IMAGE_SIDE (downscaled) or when an
+    EXIF orientation tag would rotate the image (pixels transposed, tag dropped), so
+    box fractions always refer to the image as a viewer sees it. Anything else is
+    sent byte-for-byte. Animated PNGs keep only their first frame when re-encoded.
     """
     try:
         with Image.open(io.BytesIO(data)) as im:
-            if max(im.size) <= MAX_IMAGE_SIDE:
-                return data
+            rotated = im.getexif().get(EXIF_ORIENTATION, 1) != 1
+            if max(im.size) <= MAX_IMAGE_SIDE and not rotated:
+                return data, False
+            icc = im.info.get("icc_profile")
             im = ImageOps.exif_transpose(im)
+            # Pillow resamples palette/1-bit images with NEAREST, which drops thin lines and small text.
+            if im.mode in ("P", "1"):
+                im = im.convert("RGBA" if "transparency" in im.info else "RGB")
             im.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE), Image.LANCZOS)
             out = io.BytesIO()
             if fmt == "jpeg":
-                im.convert("RGB").save(out, format="JPEG", quality=90)
+                im.convert("RGB").save(out, format="JPEG", quality=90, icc_profile=icc)
             else:
-                im.save(out, format="PNG")
-            return out.getvalue()
-    except (OSError, ValueError, Image.DecompressionBombError) as e:
+                im.save(out, format="PNG", icc_profile=icc)
+            return out.getvalue(), True
+    except Image.DecompressionBombError as e:
+        raise ImageError(f"image too large to decode safely ({e}); downscale it first") from e
+    except (OSError, ValueError) as e:
         raise ImageError(f"cannot decode image ({e})") from e
 
 
@@ -74,11 +87,12 @@ def load_image(path: str | Path) -> dict[str, Any]:
             f"(macOS: sips -s format png in.webp --out out.png; video: ffmpeg -i in.mp4 -vf fps=1 f_%04d.jpg)."
         )
     try:
-        data = fit_longest_side(data, fmt)
+        data, reencoded = fit_longest_side(data, fmt)
     except ImageError as e:
         raise ImageError(f"{p}: {e}") from e
     if len(data) > MAX_IMAGE_BYTES:
-        raise ImageError(f"{p}: {len(data) / 1_048_576:.1f} MB is over Jev's 16 MB image limit even after downscaling.")
+        after = " even after re-encoding" if reencoded else ""
+        raise ImageError(f"{p}: {len(data) / 1_048_576:.1f} MB is over Jev's 16 MB image limit{after}; downscale it first.")
     return {"type": "image", "format": fmt, "data_base64": base64.b64encode(data).decode("ascii")}
 
 

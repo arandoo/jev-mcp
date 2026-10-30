@@ -33,6 +33,9 @@ MCP client's context.
   `max(p, 1-p)`).
 - Large images are fine: anything over 1568 px on its longest side is
   downscaled before upload (needs Pillow, a declared dependency).
+  Images with an EXIF orientation tag are sent upright (pixels rotated, tag
+  dropped), so box fractions always refer to the image as you see it. A
+  re-encoded animated PNG keeps only its first frame.
 - Video: Jev has no video input. Pull frames first, e.g.
   `ffmpeg -i in.mp4 -vf fps=1 frames/f_%04d.jpg`, then pass the folder.
   WebP/HEIC: convert first (`sips -s format png in.webp --out out.png`).
