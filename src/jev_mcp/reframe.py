@@ -25,6 +25,8 @@ from .images import ImageError, load_image
 
 DEFAULT_TARGET = "The hands and the tool or material they are working on"
 PATH_HZ = 25  # crop path resolution; one sendcmd line per step
+MIN_CONF = 0.15  # box confidence below this is treated as "not located"
+MAX_FAILED_SHARE = 0.5  # more failed Jev calls than this aborts instead of rendering a blind crop
 
 
 @dataclass
@@ -34,15 +36,22 @@ class Sample:
     conf: float | None
 
 
+def parse_probe(probe_json: str, name: str = "input") -> tuple[int, int, float]:
+    try:
+        d = json.loads(probe_json)
+        s = d["streams"][0]
+        return int(s["width"]), int(s["height"]), float(d["format"]["duration"])
+    except (ValueError, KeyError, IndexError, TypeError) as e:
+        raise ValueError(f"{name}: not a video with a known duration ({e!r})") from e
+
+
 def ffprobe_video(video: Path) -> tuple[int, int, float]:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
          "-show_entries", "format=duration", "-of", "json", str(video)],
         check=True, capture_output=True, text=True,
     ).stdout
-    d = json.loads(out)
-    s = d["streams"][0]
-    return int(s["width"]), int(s["height"]), float(d["format"]["duration"])
+    return parse_probe(out, video.name)
 
 
 def parse_cut_times(showinfo_log: str) -> list[float]:
@@ -59,15 +68,26 @@ def detect_cuts(video: Path, threshold: float) -> list[float]:
     return parse_cut_times(log)
 
 
-def extract_frames(video: Path, fps: float, outdir: Path) -> list[tuple[float, Path]]:
-    subprocess.run(
-        ["ffmpeg", "-loglevel", "error", "-y", "-i", str(video), "-vf", f"fps={fps}", "-q:v", "3",
-         str(outdir / "f_%05d.jpg")],
-        check=True,
-    )
-    frames = sorted(outdir.glob("f_*.jpg"))
-    # The fps filter emits frame k at t = k / fps.
+def pair_frames(frames: list[Path], showinfo_log: str, fps: float) -> list[tuple[float, Path]]:
+    """Attach each extracted frame's real timestamp from showinfo.
+
+    ffmpeg shifts input by the container start time, so when video starts after
+    audio (pre-roll), frame k is not at k / fps. Falls back to k / fps only if
+    the log can't be matched one-to-one.
+    """
+    times = parse_cut_times(showinfo_log)
+    if len(times) == len(frames):
+        return list(zip(times, frames))
     return [(k / fps, p) for k, p in enumerate(frames)]
+
+
+def extract_frames(video: Path, fps: float, outdir: Path) -> list[tuple[float, Path]]:
+    log = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-y", "-i", str(video), "-an", "-vf", f"fps={fps},showinfo",
+         "-q:v", "3", "-fps_mode", "passthrough", str(outdir / "f_%05d.jpg")],
+        check=True, capture_output=True, text=True,
+    ).stderr
+    return pair_frames(sorted(outdir.glob("f_*.jpg")), log, fps)
 
 
 async def locate(frames: list[tuple[float, Path]], target: str, concurrency: int = 8) -> list[Sample]:
@@ -75,21 +95,29 @@ async def locate(frames: list[tuple[float, Path]], target: str, concurrency: int
     sem = asyncio.Semaphore(concurrency)
     question = {"where": {"type": "box", "instructions": target}}
 
-    async def one(t: float, path: Path) -> Sample | None:
+    async def one(t: float, path: Path) -> Sample | JevError | None:
         ph = f"IMG_{uuid.uuid4().hex}"
         async with sem:
             try:
-                res = await client.evaluate(state=ph, questions=question, assets={ph: load_image(path)})
+                asset = await asyncio.to_thread(load_image, path)
+                res = await client.evaluate(state=ph, questions=question, assets={ph: asset})
                 a = res["answers"]["where"]
                 return Sample(t, (a["box"]["left"] + a["box"]["right"]) / 2, a.get("confidence"))
-            except (JevError, ImageError, KeyError, TypeError):
+            except JevError as e:
+                return e
+            except (ImageError, KeyError, TypeError):
                 return None
 
     try:
         got = await asyncio.gather(*(one(t, p) for t, p in frames))
     finally:
         await client.aclose()
-    return [s for s in got if s is not None]
+    errors = [g for g in got if isinstance(g, JevError)]
+    samples = [g for g in got if isinstance(g, Sample)]
+    if frames and (not samples or len(errors) > MAX_FAILED_SHARE * len(frames)):
+        first = f": {errors[0]}" if errors else ""
+        raise JevError(f"Jev located {len(samples)} of {len(frames)} frames ({len(errors)} API errors){first}")
+    return samples
 
 
 def plan_path(
@@ -99,7 +127,7 @@ def plan_path(
     width: int,
     crop_w: int,
     *,
-    min_conf: float = 0.15,
+    min_conf: float = MIN_CONF,
     smooth_s: float = 1.0,
     deadzone: float = 0.12,
     hz: int = PATH_HZ,
@@ -178,6 +206,8 @@ async def reframe_async(
 ) -> dict:
     video, out = Path(video).expanduser(), Path(out).expanduser()
     aw, ah = (int(v) for v in aspect.split(":"))
+    if aw <= 0 or ah <= 0:
+        raise ValueError(f"aspect {aspect!r} needs two positive numbers, e.g. 9:16")
     width, height, duration = await asyncio.to_thread(ffprobe_video, video)
     crop_w = int(height * aw / ah) // 2 * 2
     if crop_w >= width:
@@ -189,7 +219,7 @@ async def reframe_async(
         samples = await locate(frames, target)
         path = plan_path(samples, cuts, duration, width, crop_w)
         await asyncio.to_thread(render, video, out, path, crop_w, height, work)
-    confident = [s for s in samples if s.conf is not None and s.conf >= 0.15]
+    confident = [s for s in samples if s.conf is not None and s.conf >= MIN_CONF]
     return {
         "out": str(out),
         "source": f"{width}x{height}",
@@ -216,7 +246,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--aspect", default="9:16")
     ap.add_argument("--scene-threshold", type=float, default=0.25, help="ffmpeg scene score that counts as a cut")
     a = ap.parse_args(argv)
-    info = reframe(a.video, a.out, target=a.target, fps=a.fps, aspect=a.aspect, scene_threshold=a.scene_threshold)
+    try:
+        info = reframe(a.video, a.out, target=a.target, fps=a.fps, aspect=a.aspect, scene_threshold=a.scene_threshold)
+    except (ValueError, OSError, subprocess.CalledProcessError, JevError) as e:
+        sys.exit(f"jev-reframe: {e}")
     info.pop("path")
     json.dump(info, sys.stdout, indent=2)
     print()

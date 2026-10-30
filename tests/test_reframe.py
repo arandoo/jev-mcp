@@ -67,3 +67,83 @@ def test_tool_returns_error_json_for_missing_video(tmp_path):
         video=str(tmp_path / "nope.mp4"), out=str(tmp_path / "o.mp4"),
     ))))
     assert "error" in out
+
+
+# ---------- review follow-up: mocked API, timestamps, validation ----------
+
+import asyncio  # noqa: E402
+import io  # noqa: E402
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+import respx  # noqa: E402
+from httpx import Response  # noqa: E402
+
+from jev_mcp import client as jev_client  # noqa: E402
+from jev_mcp import reframe as rf  # noqa: E402
+
+ENDPOINT = "https://jev-ai.pro/api/v1/systemone"
+os.environ["JEV_AI_API_BASE"] = "https://jev-ai.pro/api"
+
+
+def _frames(tmp_path, n):
+    from PIL import Image
+    out = []
+    for k in range(n):
+        p = tmp_path / f"f_{k:05d}.jpg"
+        Image.new("RGB", (64, 36), (k * 10 % 255, 80, 80)).save(p, format="JPEG")
+        out.append((k / 3, p))
+    return out
+
+
+def _box(left, right, conf=0.6):
+    return Response(200, json={"model": "jev-latest", "usage": {},
+                               "answers": {"where": {"type": "box", "confidence": conf,
+                                                     "box": {"top": 0.1, "bottom": 0.9, "left": left, "right": right}}}})
+
+
+@respx.mock
+def test_locate_aborts_on_auth_failure_instead_of_rendering_blind(tmp_path):
+    respx.post(ENDPOINT).mock(return_value=Response(401, text="bad key"))
+    with pytest.raises(jev_client.JevError, match="located 0 of 4.*401"):
+        asyncio.run(rf.locate(_frames(tmp_path, 4), "hands"))
+
+
+@respx.mock
+def test_locate_tolerates_a_few_failed_frames(tmp_path):
+    respx.post(ENDPOINT).mock(side_effect=[_box(0.1, 0.3), Response(500, text="x"), _box(0.5, 0.7), _box(0.6, 0.8)])
+    got = asyncio.run(rf.locate(_frames(tmp_path, 4), "hands", concurrency=1))
+    assert [round(s.cx, 2) for s in got] == [0.2, 0.6, 0.7]
+
+
+@respx.mock
+def test_locate_aborts_when_most_frames_fail(tmp_path):
+    respx.post(ENDPOINT).mock(side_effect=[_box(0.1, 0.3)] + [Response(422, text="bad image")] * 3)
+    with pytest.raises(jev_client.JevError, match="located 1 of 4"):
+        asyncio.run(rf.locate(_frames(tmp_path, 4), "hands", concurrency=1))
+
+
+def test_pair_frames_uses_real_timestamps_after_preroll(tmp_path):
+    """Video starting 0.7 s after audio: fps=3 emits frames at 0.667, 1.0, 1.333."""
+    files = [tmp_path / f"f_{k}.jpg" for k in range(3)]
+    log = "n:0 pts:20 pts_time:0.666667 x\nn:1 pts:30 pts_time:1 x\nn:2 pts:40 pts_time:1.33333 x\n"
+    assert [round(t, 3) for t, _ in rf.pair_frames(files, log, 3)] == [0.667, 1.0, 1.333]
+
+
+def test_pair_frames_falls_back_when_log_does_not_match(tmp_path):
+    files = [tmp_path / f"f_{k}.jpg" for k in range(3)]
+    assert [t for t, _ in rf.pair_frames(files, "nothing", 2)] == [0.0, 0.5, 1.0]
+
+
+def test_probe_of_audio_only_file_is_a_clear_error():
+    with pytest.raises(ValueError, match="not a video"):
+        rf.parse_probe(json.dumps({"streams": [], "format": {"duration": "3.0"}}), "song.m4a")
+
+
+def test_tool_rejects_zero_aspect_with_error_json(tmp_path):
+    from jev_mcp import server
+    out = json.loads(asyncio.run(server.jev_reframe_video(server.ReframeInput(
+        video=str(tmp_path / "v.mp4"), out=str(tmp_path / "o.mp4"), aspect="9:0",
+    ))))
+    assert "positive" in out["error"]

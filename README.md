@@ -108,9 +108,15 @@ jev-reframe lesson.mp4 lesson_9x16.mp4 --target "The speaker's face"
    when the subject leaves a dead zone (12 % of the crop width).
 4. ffmpeg renders the crop with the original audio.
 
-Measured on a 128 s 1080p sewing lesson (385 frames, ~1 min, a few cents):
-subject inside the crop 98.3 % of sampled frames vs 90.7 % for 1 fps with 5 s
-smoothing and 88.6 % for a static center crop; 100 % in the 3 s after cuts.
+Measured on a 128 s 1080p sewing lesson (385 frames, ~1 min, a few cents),
+against Jev's own boxes (not independent ground truth, so the shipped path is
+favoured): the box center was inside the crop for 98.3 % of confident frames,
+vs 90.7 % for a first prototype (1 fps, 5 s smoothing, never shipped) and
+88.6 % for a static center crop; 100 % in the 3 s after cuts. A visual check
+at six timestamps agreed except one (see below).
+
+If more than half of the Jev calls fail (bad key, rejected images, outage)
+or none locate anything, the tool returns an error instead of rendering.
 A very wide box (two hands far apart plus a tool) centers between them and
 can cut off the tool head; narrow the `target` when that matters.
 
