@@ -1,4 +1,5 @@
 """Smoke tests with a mocked TypeSafe API (no key or network needed)."""
+import asyncio
 import json
 import os
 
@@ -123,6 +124,7 @@ def test_missing_key_everywhere_raises(monkeypatch):
 # ---------- images / box ----------
 
 import base64  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 from jev_mcp.server import EvaluateImagesInput  # noqa: E402
 
@@ -245,7 +247,7 @@ async def test_batch_expands_directory_flags_review_and_sums_usage(tmp_path):
         confidence_threshold=0.8,
     )))
     assert out["count"] == 3 and out["failed"] == 1
-    assert [r["path"].rsplit("/", 1)[-1] for r in out["results"]] == ["f_0001.png", "f_0002.jpg", "broken.png"]
+    assert [Path(r["path"]).name for r in out["results"]] == ["f_0001.png", "f_0002.jpg", "broken.png"]
     reviews = sorted(tuple(r["review"]) for r in out["results"] if "review" in r)
     assert reviews == [(), ("where",)]
     assert out["usage"] == {"input_tokens": 600, "output_tokens": 8}
@@ -262,3 +264,84 @@ async def test_batch_with_no_images_errors(tmp_path):
         paths=[str(tmp_path)], questions={"q": {"type": "noul", "instructions": "?"}},
     )))
     assert "no PNG/JPEG" in out["error"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_batch_isolates_odd_response_and_unreadable_file(tmp_path, monkeypatch):
+    from jev_mcp import images
+    ok = tmp_path / "a_ok.png"
+    ok.write_bytes(PNG)
+    odd = tmp_path / "b_odd.png"
+    odd.write_bytes(PNG)
+    locked = tmp_path / "c_locked.png"
+    locked.write_bytes(PNG)
+    real_read = Path.read_bytes
+
+    def read_bytes(self):
+        if self.name == "c_locked.png":
+            raise PermissionError(13, "Permission denied")
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    respx.post(ENDPOINT).mock(side_effect=[
+        _box_response(),
+        Response(200, json={"model": "jev-latest", "usage": {}}),
+    ])
+    out = json.loads(await server.jev_evaluate_images(EvaluateImagesInput(
+        paths=[str(tmp_path)],
+        questions={"damaged": {"type": "noul", "instructions": "?"}},
+        confidence_threshold=0.5,
+    )))
+    by_name = {Path(r["path"]).name: r for r in out["results"]}
+    assert "answers" in by_name["a_ok.png"]
+    assert "unexpected Jev response" in by_name["b_odd.png"]["error"]
+    assert "cannot read" in by_name["c_locked.png"]["error"]
+    assert out["failed"] == 2
+    assert isinstance(images.ImageError("x"), ValueError)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_batch_loads_at_most_concurrency_images_at_once(tmp_path, monkeypatch):
+    from jev_mcp import images
+    for i in range(20):
+        (tmp_path / f"f_{i:02d}.png").write_bytes(PNG)
+    live = 0
+    peak = 0
+    real_load = images.load_image
+
+    def counting_load(path):
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        return real_load(path)
+
+    async def slow(request):
+        nonlocal live
+        await asyncio.sleep(0.01)
+        live -= 1
+        return _box_response()
+
+    monkeypatch.setattr(server, "load_image", counting_load)
+    respx.post(ENDPOINT).mock(side_effect=slow)
+    out = json.loads(await server.jev_evaluate_images(EvaluateImagesInput(
+        paths=[str(tmp_path)], questions={"damaged": {"type": "noul", "instructions": "?"}},
+    )))
+    assert out["failed"] == 0
+    assert peak <= server.BATCH_CONCURRENCY
+
+
+@pytest.mark.parametrize("images_map, state", [
+    ({"type": "/x.png"}, "no placeholder"),          # matched a JSON key before
+    ({"IMG": "/x.png"}, "IMG"),                       # too short
+    ({"IMG_1": "/a.png", "IMG_12": "/b.png"}, "IMG_1 IMG_12"),  # nested placeholders
+])
+def test_bad_placeholders_rejected(images_map, state):
+    with pytest.raises(ValueError):
+        EvaluateInput(state=state, images=images_map, questions={"q": {"type": "noul", "instructions": "?"}})
+
+
+def test_placeholder_with_backslash_or_quote_accepted():
+    EvaluateInput(state='see C:\\img and "IMG_q"', images={"C:\\img": "/a.png", '"IMG_q"': "/b.png"},
+                  questions={"q": {"type": "noul", "instructions": "?"}})

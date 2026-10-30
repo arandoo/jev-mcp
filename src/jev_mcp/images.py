@@ -34,7 +34,10 @@ def load_image(path: str | Path) -> dict[str, Any]:
     size = p.stat().st_size
     if size > MAX_IMAGE_BYTES:
         raise ImageError(f"{p}: {size / 1_048_576:.1f} MB is over Jev's 16 MB image limit; downscale it first.")
-    data = p.read_bytes()
+    try:
+        data = p.read_bytes()
+    except OSError as e:
+        raise ImageError(f"{p}: cannot read file ({e.strerror or e}).") from e
     fmt = sniff_format(data[:8])
     if fmt is None:
         raise ImageError(

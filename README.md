@@ -18,8 +18,12 @@ MCP client's context.
 
 - `jev_evaluate`: `images={"IMG_parcel": "~/photos/p1.jpg"}` and put
   `IMG_parcel` where Jev should see the image (state, instructions or criteria).
-  A placeholder that appears nowhere is rejected, so an image is never dropped
-  silently.
+  A placeholder that appears nowhere, is shorter than 4 characters, or sits
+  inside another placeholder is rejected, so an image is never dropped or
+  mangled silently.
+- The server reads whatever local path the model names and uploads it to
+  TypeSafe (PNG/JPEG only). Fine for a local single-user tool; don't point it
+  at folders with private photos you would not send to a third party.
 - `box` questions take only `instructions` ("the damaged area", "the person's
   face") and return `{top, bottom, left, right}` as fractions of image height
   and width, plus a confidence. They need an image.
@@ -89,4 +93,4 @@ images/box contract from `https://api.typesafe.ai/openapi.json` (API 0.2.0), ver
 Default API base: `https://jev-ai.pro/api` (override with `JEV_AI_API_BASE`).
 `https://api.typesafe.ai` accepts our key as of 2026-10-30 (live image calls answered by `jev-1.14.0`).
 Jev 1.13 limits: 64k total context, 32k for state + longest question.
-Images: PNG/JPEG only, 16 MB per image; input ~$0.04 per 1M tokens, output free.
+Images: PNG/JPEG only (by spec); 16 MB per image is the documented product limit, not in the OpenAPI spec; input ~$0.04 per 1M tokens, output free.

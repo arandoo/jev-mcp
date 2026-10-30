@@ -40,6 +40,19 @@ def get_client() -> JevClient:
 # ---------- Input models ----------
 
 
+def iter_strings(value: Any):
+    """Every string in a JSON-like value, including dict keys."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield str(k)
+            yield from iter_strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from iter_strings(v)
+
+
 class Question(BaseModel):
     """One typed question. Matches TypeSafe's Question schema."""
 
@@ -98,11 +111,16 @@ class EvaluateInput(BaseModel):
     @model_validator(mode="after")
     def _check_images(self) -> "EvaluateInput":
         if self.images:
-            text = json.dumps(
-                [self.state, [q.model_dump(exclude_none=True) for q in self.questions.values()]],
-                ensure_ascii=False,
-            )
-            missing = [ph for ph in self.images if ph not in text]
+            phs = list(self.images)
+            if any(len(ph) < 4 for ph in phs):
+                raise ValueError("image placeholders must be at least 4 characters, e.g. 'IMG_receipt'")
+            nested = [(a, b) for a in phs for b in phs if a != b and a in b]
+            if nested:
+                raise ValueError(f"placeholder {nested[0][0]!r} is part of {nested[0][1]!r}; Jev would replace it inside the other")
+            strings = list(iter_strings(self.state))
+            for q in self.questions.values():
+                strings += list(iter_strings(q.instructions)) + list(iter_strings(q.criteria))
+            missing = [ph for ph in phs if not any(ph in s for s in strings)]
             if missing:
                 raise ValueError(f"image placeholders not used in state, instructions or criteria: {missing}")
         elif any(q.type == "box" for q in self.questions.values()):
@@ -210,18 +228,21 @@ async def jev_evaluate_images(params: EvaluateImagesInput) -> str:
     async def one(path) -> dict[str, Any]:
         ph = f"IMG_{uuid.uuid4().hex}"
         state = f"{params.context}\n{ph}" if params.context else ph
+        # Load inside the semaphore so at most BATCH_CONCURRENCY images sit in memory.
+        async with sem:
+            try:
+                res = await client.evaluate(state=state, questions=questions, model=params.model, assets={ph: load_image(path)})
+            except (JevError, ImageError) as e:
+                return {"path": str(path), "error": str(e)}
         try:
-            asset = load_image(path)
-            async with sem:
-                res = await client.evaluate(state=state, questions=questions, model=params.model, assets={ph: asset})
-        except (JevError, ImageError) as e:
-            return {"path": str(path), "error": str(e)}
-        item: dict[str, Any] = {"path": str(path), "answers": res["answers"], "_model": res.get("model"), "_usage": res.get("usage", {})}
-        if params.confidence_threshold is not None:
-            item["review"] = [
-                qid for qid, a in res["answers"].items()
-                if (c := answer_confidence(a)) is not None and c < params.confidence_threshold
-            ]
+            item: dict[str, Any] = {"path": str(path), "answers": res["answers"], "_model": res.get("model"), "_usage": res.get("usage") or {}}
+            if params.confidence_threshold is not None:
+                item["review"] = [
+                    qid for qid, a in res["answers"].items()
+                    if (c := answer_confidence(a)) is not None and c < params.confidence_threshold
+                ]
+        except (KeyError, TypeError, AttributeError) as e:
+            return {"path": str(path), "error": f"unexpected Jev response shape ({e!r}): {json.dumps(res)[:300]}"}
         return item
 
     results = await asyncio.gather(*(one(f) for f in files))
