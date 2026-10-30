@@ -91,6 +91,29 @@ claude mcp add jev -s user -- /absolute/path/to/jev-mcp/.venv/bin/jev-mcp
 it only for the current directory. Restart the session afterwards — MCP servers
 are loaded at startup.
 
+## Auto-reframe video (`jev_reframe_video`, `jev-reframe`)
+
+Turns a landscape video into a vertical crop (default 9:16) that follows what
+you describe (default: the hands and the tool or material they work on). Needs
+`ffmpeg`/`ffprobe` on PATH.
+
+```bash
+jev-reframe lesson.mp4 lesson_9x16.mp4 --target "The speaker's face"
+```
+
+1. ffmpeg samples frames (default 3 fps) and finds hard cuts (scene score > 0.25).
+2. Jev answers one `box` question per frame (8 in parallel).
+3. The crop path ignores boxes under 0.15 confidence, interpolates, smooths
+   with a 1 s window that never crosses a cut, jumps at cuts, and only moves
+   when the subject leaves a dead zone (12 % of the crop width).
+4. ffmpeg renders the crop with the original audio.
+
+Measured on a 128 s 1080p sewing lesson (385 frames, ~1 min, a few cents):
+subject inside the crop 98.3 % of sampled frames vs 90.7 % for 1 fps with 5 s
+smoothing and 88.6 % for a static center crop; 100 % in the 3 s after cuts.
+A very wide box (two hands far apart plus a tool) centers between them and
+can cut off the tool head; narrow the `target` when that matters.
+
 ## API reference
 
 Docs: https://docs.typesafe.ai/api — `POST /v1/systemone`, verified 2026-09-21;

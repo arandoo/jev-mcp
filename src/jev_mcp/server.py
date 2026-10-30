@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import uuid
 from typing import Any, Literal
 
@@ -299,6 +300,45 @@ async def jev_route(params: RouteInput) -> str:
         },
         indent=2,
     )
+
+
+class ReframeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    video: str = Field(description="Local landscape video file (anything ffmpeg reads).")
+    out: str = Field(description="Output .mp4 path for the vertical video.")
+    target: str = Field(
+        default="The hands and the tool or material they are working on",
+        description="What the crop should follow, e.g. 'The speaker's face' or 'The bag being sewn'.",
+    )
+    fps: float = Field(default=3.0, gt=0, le=10, description="Frames per second sent to Jev (cost scales with it).")
+    aspect: str = Field(default="9:16", pattern=r"^\d+:\d+$")
+    scene_threshold: float = Field(default=0.25, gt=0, lt=1, description="ffmpeg scene score that counts as a hard cut.")
+
+
+@mcp.tool(
+    name="jev_reframe_video",
+    annotations=ToolAnnotations(title="Auto-reframe video with Jev", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True),
+)
+async def jev_reframe_video(params: ReframeInput) -> str:
+    """Turn a landscape video into a vertical (default 9:16) crop that follows what
+    `target` describes: samples frames with ffmpeg, locates the target with Jev box
+    questions, jumps at hard cuts, smooths within a shot, renders with ffmpeg.
+    Needs ffmpeg/ffprobe on PATH. Writes `out`; never touches the source.
+    A 2-minute 1080p video at 3 fps costs about 400 Jev calls (a few cents) and ~1 min.
+
+    Returns JSON: {"out", "source", "crop", "duration_s", "frames", "located", "confident", "cuts", "path"}.
+    """
+    from .reframe import reframe_async
+
+    try:
+        info = await reframe_async(
+            params.video, params.out, target=params.target, fps=params.fps,
+            aspect=params.aspect, scene_threshold=params.scene_threshold,
+        )
+    except (ValueError, OSError, subprocess.CalledProcessError, JevError) as e:
+        return json.dumps({"error": str(e)})
+    return json.dumps(info, indent=2)
 
 
 def main() -> None:
